@@ -1,0 +1,13 @@
+{
+    "dt_accuracy": 0.96,
+    "rf_accuracy": 0.9785,
+    "dt_f1_malicious": 0.9226441631504922,
+    "rf_f1_malicious": 0.9590163934426229,
+    "class_distribution": {
+        "safe": 7324,
+        "malicious": 1809
+    },
+    "trained_at": "2026-03-31T07:38:19.477147+00:00",
+    "samples_used": 9999,
+    "features_used": 51
+}
