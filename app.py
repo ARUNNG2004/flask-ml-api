@@ -29,7 +29,9 @@ METRICS_PATH = os.path.join(MODELS_DIR, 'training_metrics.json')
 init_db()
 
 _training_metrics = None
-
+# -------------------------------
+# Helper functions FIRST
+# -------------------------------
 
 def _load_training_metrics():
     global _training_metrics
@@ -42,29 +44,68 @@ def _load_training_metrics():
     return _training_metrics
 
 
-_load_training_metrics()
+def check_models_trained():
+    return (
+        os.path.exists(DT_PATH) and
+        os.path.exists(RF_PATH) and
+        os.path.exists(COLS_PATH)
+    )
 
 
 def json_response(data=None, error=None, success=True, status=200):
-    return jsonify({"success": success, "data": data, "error": error}), status
+    return jsonify({
+        "success": success,
+        "data": data,
+        "error": error
+    }), status
 
+
+# -------------------------------
+# Load metrics (safe)
+# -------------------------------
+
+_load_training_metrics()
+
+
+# -------------------------------
+# 🚀 STARTUP TRAINING (FIXED)
+# -------------------------------
 
 print("🚀 Initializing model loading...")
 
-if not check_models_trained():
-    try:
+try:
+    if not check_models_trained():
         print("⚠️ Models missing at startup. Training now...")
+
         from model_trainer import train_models
         train_models()
+
         _load_training_metrics()
+
+        if not check_models_trained():
+            raise RuntimeError("Training completed but model files still missing!")
+
         print("✅ Models trained successfully at startup.")
-    except Exception as e:
-        print("❌ Startup training failed:", str(e))
+    else:
+        print("✅ Models already available. Skipping training.")
+
+except Exception as e:
+    print("❌ Startup training failed:", str(e))
+    import traceback
+    traceback.print_exc()
+
+    # 🔴 HARD FAIL (recommended for production)
+    raise RuntimeError("App stopped due to model training failure")
+
+
+# -------------------------------
+# Routes
+# -------------------------------
 
 @app.route('/')
 def home():
     return "API is live"
-
+    
 @app.before_request
 def check_models_before_predict():
     if (request.endpoint == 'predict'
