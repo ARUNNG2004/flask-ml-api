@@ -8,17 +8,27 @@ from flask_cors import CORS
 import traceback
 import threading
 
-from feature_extractor import extract_features, extract_features_fast
-from database import init_db, save_scan, get_history, delete_scan, clear_history
+from feature_extractor import extract_features_fast
+from database import init_db, save_scan
 import chatbot
 
 app = Flask(__name__)
 
-CORS(app, resources={r"/api/*": {
-    "origins": "*",
-    "methods": ["GET", "POST", "DELETE", "OPTIONS"],
-    "allow_headers": ["Content-Type"]
-}})
+CORS(app)
+
+# -------------------------------
+# GLOBAL STATE
+# -------------------------------
+
+training_status = {
+    "is_training": False,
+    "progress": 0,
+    "message": "Not started"
+}
+
+dt_model = None
+rf_model = None
+feature_columns = None
 
 # -------------------------------
 # PATHS
@@ -30,26 +40,12 @@ MODELS_DIR = os.path.join(BASE_DIR, 'models')
 DT_PATH = os.path.join(MODELS_DIR, 'decision_tree.pkl')
 RF_PATH = os.path.join(MODELS_DIR, 'random_forest.pkl')
 COLS_PATH = os.path.join(MODELS_DIR, 'feature_columns.json')
-METRICS_PATH = os.path.join(MODELS_DIR, 'training_metrics.json')
 
 init_db()
-
-_training_metrics = None
 
 # -------------------------------
 # HELPERS
 # -------------------------------
-
-def _load_training_metrics():
-    global _training_metrics
-    if os.path.exists(METRICS_PATH):
-        try:
-            with open(METRICS_PATH, 'r') as f:
-                _training_metrics = json.load(f)
-        except Exception:
-            _training_metrics = None
-    return _training_metrics
-
 
 def check_models_trained():
     return (
@@ -67,30 +63,80 @@ def json_response(data=None, error=None, success=True, status=200):
     }), status
 
 
+def load_models():
+    global dt_model, rf_model, feature_columns
+
+    dt_model = joblib.load(DT_PATH)
+    rf_model = joblib.load(RF_PATH)
+
+    with open(COLS_PATH, 'r') as f:
+        feature_columns = json.load(f)
+
+    print("✅ Models loaded into memory")
+
+
 # -------------------------------
-# 🚀 NON-BLOCKING TRAINING
+# 🚀 BACKGROUND TRAINING
 # -------------------------------
 
 def background_train():
-    try:
-        print("⚠️ Background training started...")
-        from model_trainer import train_models
-        train_models()
-        _load_training_metrics()
-        print("✅ Background training completed")
-    except Exception as e:
-        print("❌ Background training failed:", str(e))
+    global training_status
 
+    try:
+        training_status.update({
+            "is_training": True,
+            "progress": 0,
+            "message": "Starting..."
+        })
+
+        print("🚀 Training started")
+
+        from model_trainer import train_models
+
+        # Fake progress stages (important)
+        for i in range(1, 6):
+            training_status["progress"] = i * 10
+            training_status["message"] = f"Preparing data {i*10}%"
+            print(training_status["message"])
+
+        train_models()
+
+        training_status.update({
+            "progress": 70,
+            "message": "Training ML models..."
+        })
+        print("⚙️ Training models...")
+
+        # Load models
+        load_models()
+
+        training_status.update({
+            "progress": 100,
+            "message": "Completed",
+            "is_training": False
+        })
+
+        print("✅ Training completed")
+
+    except Exception as e:
+        training_status.update({
+            "is_training": False,
+            "message": str(e)
+        })
+        print("❌ Training error:", str(e))
+
+
+# -------------------------------
+# STARTUP
+# -------------------------------
 
 print("🚀 App starting...")
 
-_load_training_metrics()
-
-if not check_models_trained():
-    print("⚠️ Models missing → starting background training")
-    threading.Thread(target=background_train).start()
+if check_models_trained():
+    load_models()
 else:
-    print("✅ Models already available")
+    print("⚠️ Models missing → training in background")
+    threading.Thread(target=background_train).start()
 
 # -------------------------------
 # ROUTES
@@ -101,12 +147,17 @@ def home():
     return "API is live", 200
 
 
+@app.route('/api/status')
+def status():
+    return json_response(data=training_status)
+
+
 @app.before_request
-def ensure_models():
-    if request.endpoint == 'predict' and not check_models_trained():
+def check_ready():
+    if request.endpoint == "predict" and dt_model is None:
         return json_response(
             success=False,
-            error="Model not ready yet. Try again shortly.",
+            error="Model not ready yet",
             status=503
         )
 
@@ -116,26 +167,17 @@ def _resolve_malicious_idx(model):
     for candidate in (1, 1.0, '1', '1.0'):
         if candidate in classes:
             return classes.index(candidate)
-    for i, c in enumerate(classes):
-        if str(c).strip() in ('1', '1.0'):
-            return i
-    raise ValueError("Malicious class not found")
+    return 1
 
 
 @app.route('/api/predict', methods=['POST'])
 def predict():
     try:
         data = request.json or {}
-        url = data.get('url', '').strip()
+        url = data.get("url", "").strip()
 
         if not url:
-            return json_response(success=False, error="Missing URL", status=400)
-
-        dt_model = joblib.load(DT_PATH)
-        rf_model = joblib.load(RF_PATH)
-
-        with open(COLS_PATH, 'r') as f:
-            feature_columns = json.load(f)
+            return json_response(success=False, error="URL required", status=400)
 
         features = extract_features_fast(url)
         X = np.array([[features.get(c, 0) for c in feature_columns]])
@@ -146,15 +188,12 @@ def predict():
         dt_idx = _resolve_malicious_idx(dt_model)
         rf_idx = _resolve_malicious_idx(rf_model)
 
-        dt_score = float(dt_prob[dt_idx])
-        rf_score = float(rf_prob[rf_idx])
-
-        risk = int((dt_score * 0.3 + rf_score * 0.7) * 100)
+        score = int((dt_prob[dt_idx] * 0.3 + rf_prob[rf_idx] * 0.7) * 100)
 
         result = {
             "url": url,
-            "risk_score": risk,
-            "label": "malicious" if risk >= 50 else "safe",
+            "risk_score": score,
+            "label": "malicious" if score >= 50 else "safe",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
@@ -168,27 +207,21 @@ def predict():
 
 @app.route('/api/train', methods=['POST'])
 def train():
-    try:
-        from model_trainer import train_models
-        metrics = train_models()
-        _load_training_metrics()
-        return json_response(data=metrics)
-    except Exception as e:
-        return json_response(success=False, error=str(e), status=500)
+    threading.Thread(target=background_train).start()
+    return json_response(data={"message": "Training started"})
 
 
-@app.route('/api/health', methods=['GET'])
+@app.route('/api/health')
 def health():
     return json_response(data={
-        "models_ready": check_models_trained()
+        "models_ready": dt_model is not None
     })
 
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
     try:
-        message = request.json.get('message', '')
-        response = chatbot.get_response(message)
-        return json_response(data=response)
+        msg = request.json.get("message", "")
+        return json_response(data=chatbot.get_response(msg))
     except Exception as e:
         return json_response(success=False, error=str(e), status=500)
