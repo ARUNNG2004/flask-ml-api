@@ -49,13 +49,21 @@ def json_response(data=None, error=None, success=True, status=200):
     return jsonify({"success": success, "data": data, "error": error}), status
 
 
-def check_models_trained():
-    return (
-        os.path.exists(DT_PATH) and
-        os.path.exists(RF_PATH) and
-        os.path.exists(COLS_PATH)
-    )
+print("🚀 Initializing model loading...")
 
+if not check_models_trained():
+    try:
+        print("⚠️ Models missing at startup. Training now...")
+        from model_trainer import train_models
+        train_models()
+        _load_training_metrics()
+        print("✅ Models trained successfully at startup.")
+    except Exception as e:
+        print("❌ Startup training failed:", str(e))
+
+@app.route('/')
+def home():
+    return "API is live"
 
 @app.before_request
 def check_models_before_predict():
